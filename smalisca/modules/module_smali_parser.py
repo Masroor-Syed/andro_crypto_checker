@@ -30,16 +30,26 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
-"""Implements parsing functionalities for Smali files"""
+"""
+    Implements parsing functionalities for Smali files
+"""
 
-import codecs
 import os
 import re
-from smalisca.core.smalisca_module import ModuleBase
-from smalisca.core.smalisca_logging import log
 
+PRIMITIVE_TYPES = {
+    'V' : 'Void',
+    'Z' : 'Boolean',
+    'B' : 'Byte',
+    'S' : 'Short',
+    'C' : 'Char',
+    'I' : 'Int',
+    'J' : 'Long',
+    'F' : 'Float',
+    'D' : 'Double'
+}
 
-class SmaliParser(ModuleBase):
+class SmaliParser():
     """Iterate through files and extract data
 
     Attributes:
@@ -49,15 +59,56 @@ class SmaliParser(ModuleBase):
         classes (list): Found classes
 
     """
-    def __init__(self, location, suffix):
+    def __init__(self, location, suffix, debug):
         self.location = location
         self.suffix = suffix
         self.current_path = None
         self.classes = []
+        self.debug = debug
+        self.crypto_files = []
 
     def run(self):
-        """Start main task"""
-        self.parse_location()
+        """
+            Looks for files that use crypto and parses them
+        """
+        self.detect_lib_crypto_use()
+        self.parse_crypto_files()
+
+    def detect_lib_crypto_use(self):
+        """
+            Parse files in specified location to detect if
+            cryptography is used in a file append file path
+            to the crypto_file list
+        """
+        for root, dirs, files in os.walk(self.location):
+            for f in files:
+                if f.endswith(self.suffix):
+                    file_path = root + "/" + f
+                    # Set current path
+                    self.current_path = file_path
+
+                    if self.detect_file_crypto_use(file_path):
+                        self.d_log("Crypto use found in file:\t %s" % file_path)
+                        self.crypto_files.append(file_path)
+
+    def detect_file_crypto_use(self,file_path):
+        """
+            Searches a smali file to detect the use of doFinal method used for
+            cryptogrpahic implementations
+        """
+        detected = False
+        pattern = r'javax/crypto/Cipher;->doFinal'
+        regex = re.compile(pattern)
+        with open(file_path, 'r', encoding='utf8') as f:
+            fcontent = f.read()
+            if regex.search(fcontent) is not None:
+                detected =  True
+
+        return detected
+
+    def parse_crypto_files(self):
+        for file_path in self.crypto_files:
+            self.parse_file(file_path)
 
     def parse_file(self, filename):
         """Parse specific file
@@ -72,7 +123,7 @@ class SmaliParser(ModuleBase):
             filename (str): Filename of file to be parsed
 
         """
-        with codecs.open(filename, 'r', encoding='utf8') as f:
+        with open(filename, 'r', encoding='utf8') as f:
             current_class = None
             current_method = None
             current_call_index = 0
@@ -96,11 +147,11 @@ class SmaliParser(ModuleBase):
                         p = self.extract_class_property(match_class_property)
                         current_class['properties'].append(p)
 
-                elif 'const-string' in l:
-                    match_const_string = self.is_const_string(l)
-                    if match_const_string:
-                        c = self.extract_const_string(match_const_string)
-                        current_class['const-strings'].append(c)
+                #elif 'const-string' in l:
+                    #match_const_string = self.is_const_string(l)
+                    #if match_const_string:
+                        #c = self.extract_const_string(match_const_string)
+                        #current_class['const-strings'].append(c)
 
                 elif '.method' in l:
                     match_class_method = self.is_class_method(l)
@@ -113,7 +164,7 @@ class SmaliParser(ModuleBase):
                 elif 'invoke' in l:
                     match_method_call = self.is_method_call(l)
                     if match_method_call:
-                        m = self.extract_method_call(match_method_call)
+                        m, is_crypto = self.extract_method_call(match_method_call)
 
                         # Add calling method (src)
                         m['src'] = current_method['name']
@@ -122,8 +173,12 @@ class SmaliParser(ModuleBase):
                         m['index'] = current_call_index
                         current_call_index += 1
 
-                        # Add call to current method
+                        # Add call to current method 
                         current_method['calls'].append(m)
+                        # Add to classes crypto method
+                        if is_crypto:
+                            cm = self.extract_crypto_method(current_method)
+                            current_class['crypto_methods'].append(cm)
         # Close fd
         f.close()
 
@@ -139,7 +194,7 @@ class SmaliParser(ModuleBase):
                     self.current_path = file_path
 
                     # Parse file
-                    log.debug("Parsing file:\t %s" % f)
+                    self.d_log("Parsing file:\t %s" % f)
                     self.parse_file(file_path)
 
     def is_class(self, line):
@@ -154,7 +209,7 @@ class SmaliParser(ModuleBase):
         """
         match = re.search("\.class\s+(?P<class>.*);", line)
         if match:
-            log.debug("Found class: %s" % match.group('class'))
+            self.d_log("Found class: %s" % match.group('class'))
             return match.group('class')
         else:
             return None
@@ -171,7 +226,7 @@ class SmaliParser(ModuleBase):
         """
         match = re.search("\.super\s+(?P<parent>.*);", line)
         if match:
-            log.debug("\t\tFound parent class: %s" % match.group('parent'))
+            self.d_log("\t\tFound parent class: %s" % match.group('parent'))
             return match.group('parent')
         else:
             return None
@@ -189,7 +244,7 @@ class SmaliParser(ModuleBase):
         """
         match = re.search("\.field\s+(?P<property>.*);", line)
         if match:
-            log.debug("\t\tFound property: %s" % match.group('property'))
+            self.d_log("\t\tFound property: %s" % match.group('property'))
             return match.group('property')
         else:
             return None
@@ -207,7 +262,7 @@ class SmaliParser(ModuleBase):
         """
         match = re.search("const-string\s+(?P<const>.*)", line)
         if match:
-            log.debug("\t\tFound const-string: %s" % match.group('const'))
+            self.d_log("\t\tFound const-string: %s" % match.group('const'))
             return match.group('const')
         else:
             return None
@@ -224,7 +279,7 @@ class SmaliParser(ModuleBase):
         """
         match = re.search("\.method\s+(?P<method>.*)$", line)
         if match:
-            log.debug("\t\tFound method: %s" % match.group('method'))
+            self.d_log("\t\tFound method: %s" % match.group('method'))
             return match.group('method')
         else:
             return None
@@ -241,7 +296,7 @@ class SmaliParser(ModuleBase):
         """
         match = re.search("invoke-\w+(?P<invoke>.*)", line)
         if match:
-            log.debug("\t\t Found invoke: %s" % match.group('invoke'))
+            self.d_log("\t\t Found invoke: %s" % match.group('invoke'))
             return match.group('invoke')
         else:
             return None
@@ -257,7 +312,7 @@ class SmaliParser(ModuleBase):
 
         """
         class_info = data.split(" ")
-        log.debug("class_info: %s" % class_info[-1].split('/')[:-1])
+        self.d_log("class_info: %s" % class_info[-1].split('/')[:-1])
         c = {
             # Last element is the class name
             'name': class_info[-1],
@@ -281,7 +336,10 @@ class SmaliParser(ModuleBase):
             'const-strings': [],
 
             # Methods
-            'methods': []
+            'methods': [],
+
+            # Methods using Cryptography
+            'crypto_methods' : []
         }
 
         return c
@@ -390,6 +448,26 @@ class SmaliParser(ModuleBase):
 
         return m
 
+    def extract_crypto_method(self,method):
+        """
+            Extract details of method that is calling on a crypto function
+        """
+        cm = {
+            # Method name
+            'name': method['name'],
+
+            # Arguments
+            'args': method['args'],
+
+            # Return value
+            'return': method['return'],
+
+            # Additional info such as public static etc.
+            'type': method['type']
+        }
+
+        return cm
+
     def extract_method_call(self, data):
         """Extract method call information
 
@@ -406,6 +484,7 @@ class SmaliParser(ModuleBase):
         c_local_args = None
         c_dst_args = None
         c_ret = None
+        crypto = False
 
         # The call looks like this
         #  <destination class>) -> <method>(args)<return value>
@@ -436,8 +515,11 @@ class SmaliParser(ModuleBase):
             # Return value
             'return': c_ret
         }
+        # check if the crypto funciton is being called in this method
+        if c_dst_method == "doFinal":
+            crypto = True
 
-        return c
+        return (c,crypto)
 
     def get_results(self):
         """Get found classes in specified location
@@ -447,3 +529,38 @@ class SmaliParser(ModuleBase):
 
         """
         return self.classes
+
+    def d_log(self, msg):
+        if self.debug:
+            print(msg)
+
+    @staticmethod
+    def extract_type(line):
+        ret_type = 'Null'
+        # check if the type is primitive
+        if len(line)==1 and line in 'VZBSCIJFD':
+            return PRIMITIVE_TYPES[line]
+        # check if the type is primitive array
+        elif len(line)==2 and line[0] == '[' and line[1] in 'VZBSCIJFD':
+            return PRIMITIVE_TYPES[line] + ' Array'
+        elif line[0] == 'L':
+            return line[1:-1]
+        else:
+            return 'Invalid Type'
+
+
+
+    @staticmethod
+    def parse_method_call(line):
+        pattern = r'invoke-virtual\s*({[\w\s,]*}),[\s]*([\w/]*);->([\w_]*)\(([\w\[/;]*)\)([\[\w/]*)'
+        regex = re.compile(pattern)
+        call_data = regex.match(line)
+
+        m_para_reg = call_data.group(1)
+        m_class = call_data.group(2)
+        m_name = call_data.group(3)
+        m_para_types = call_data.group(4)
+        m_ret_type = call_data.group(5)
+
+        return (m_para_reg, m_class, m_name, m_para_types, m_ret_type)
+
